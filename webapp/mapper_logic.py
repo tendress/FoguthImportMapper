@@ -147,6 +147,10 @@ class WealthboxLookups:
     contact_id_to_tags: Mapping[int, Set[str]]
     phone_rows_loaded: int = 0
     email_rows_loaded: int = 0
+    connected: bool = False
+    source: str = ""
+    error: str | None = None
+    tables: Mapping[str, bool] | None = None
 
 
 def compute_wb_matches(

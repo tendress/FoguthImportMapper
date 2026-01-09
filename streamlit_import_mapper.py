@@ -178,8 +178,17 @@ def main() -> None:
 
     checks = simple_validate(mapped)
     if wb is not None:
+        checks.append(("WB source", getattr(wb, "source", "")))
+        checks.append(("WB connected", bool(getattr(wb, "connected", False))))
+        if getattr(wb, "error", None):
+            checks.append(("WB error", str(getattr(wb, "error"))))
+        tables = getattr(wb, "tables", None)
+        if isinstance(tables, dict) and tables:
+            checks.append(("WB tables", ", ".join(f"{k}={v}" for k, v in tables.items())))
         checks.append(("WB phone rows loaded", getattr(wb, "phone_rows_loaded", 0)))
         checks.append(("WB email rows loaded", getattr(wb, "email_rows_loaded", 0)))
+        checks.append(("WB unique phones", len(getattr(wb, "phone_to_contact_ids", {}) or {})))
+        checks.append(("WB unique emails", len(getattr(wb, "email_to_contact_ids", {}) or {})))
     st.subheader("Checks")
     st.table(pd.DataFrame(checks, columns=["check", "value"]))
 

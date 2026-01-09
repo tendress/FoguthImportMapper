@@ -101,76 +101,114 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
     contact_id_to_tags: Dict[int, Set[str]] = {}
     phone_rows_loaded = 0
     email_rows_loaded = 0
+    connected = False
+    tables: Dict[str, bool] = {}
+    err: str | None = None
 
     if not (database_url or "").strip():
-        return WealthboxLookups(phone_to_contact_ids, email_to_contact_ids, contact_id_to_tags)
+        return WealthboxLookups(
+            phone_to_contact_ids,
+            email_to_contact_ids,
+            contact_id_to_tags,
+            connected=False,
+            source="supabase",
+            error="DATABASE_URL empty",
+            tables=None,
+        )
 
     try:
         conn = psycopg2.connect(database_url)
     except Exception:
-        return WealthboxLookups(phone_to_contact_ids, email_to_contact_ids, contact_id_to_tags)
+        err = "Failed to connect to Postgres (check DATABASE_URL, SSL, network, and password)."
+        return WealthboxLookups(
+            phone_to_contact_ids,
+            email_to_contact_ids,
+            contact_id_to_tags,
+            connected=False,
+            source="supabase",
+            error=err,
+            tables=None,
+        )
+
+    connected = True
 
     try:
         with conn:
+            # Table presence (helps debug when lookups stay empty)
+            try:
+                with conn.cursor() as cur:
+                    for t in ("wb_phone_numbers", "wb_emails", "wb_tags", "wb_contacts"):
+                        cur.execute("SELECT to_regclass(%s)", (f"public.{t}",))
+                        row = cur.fetchone()
+                        tables[t] = bool(row and row[0] is not None)
+            except Exception:
+                # If we can't check, don't fail the load.
+                tables = {}
+
             # Phones
             try:
-                rows = _fetch_rows(conn, "wb_phone_numbers", "phone_numbers_parsed")
-                phone_rows_loaded = len(rows)
-                for cid, v in rows:
-                    for item in _as_list(v):
-                        if isinstance(item, dict) and "address" in item:
-                            digits = _normalize_phone_value(item.get("address"))
-                        else:
-                            digits = _normalize_phone_value(item)
-                        if digits:
-                            phone_to_contact_ids.setdefault(digits, set()).add(cid)
+                if tables.get("wb_phone_numbers", True):
+                    rows = _fetch_rows(conn, "wb_phone_numbers", "phone_numbers_parsed")
+                    phone_rows_loaded = len(rows)
+                    for cid, v in rows:
+                        for item in _as_list(v):
+                            if isinstance(item, dict) and "address" in item:
+                                digits = _normalize_phone_value(item.get("address"))
+                            else:
+                                digits = _normalize_phone_value(item)
+                            if digits:
+                                phone_to_contact_ids.setdefault(digits, set()).add(cid)
             except Exception:
                 pass
 
             # Emails
             try:
-                rows = _fetch_rows(conn, "wb_emails", "email_addresses_parsed")
-                email_rows_loaded = len(rows)
-                for cid, v in rows:
-                    for item in _as_list(v):
-                        if isinstance(item, dict) and "address" in item:
-                            em = _safe_lower_strip(item.get("address"))
-                        else:
-                            em = _safe_lower_strip(item)
-                        if em:
-                            email_to_contact_ids.setdefault(em, set()).add(cid)
+                if tables.get("wb_emails", True):
+                    rows = _fetch_rows(conn, "wb_emails", "email_addresses_parsed")
+                    email_rows_loaded = len(rows)
+                    for cid, v in rows:
+                        for item in _as_list(v):
+                            if isinstance(item, dict) and "address" in item:
+                                em = _safe_lower_strip(item.get("address"))
+                            else:
+                                em = _safe_lower_strip(item)
+                            if em:
+                                email_to_contact_ids.setdefault(em, set()).add(cid)
             except Exception:
                 pass
 
             # Tags
             try:
-                for cid, v in _fetch_rows(conn, "wb_tags", "tags_parsed"):
-                    tags: Set[str] = set()
-                    for item in _as_list(v):
-                        if isinstance(item, dict):
-                            tag = (
-                                item.get("name")
-                                or item.get("tag_name")
-                                or item.get("title")
-                                or item.get("label")
-                                or ""
-                            )
-                            tag = str(tag).strip()
-                            if tag:
-                                tags.add(tag)
-                        else:
-                            s = str(item).strip()
-                            if s:
-                                tags.add(s)
-                    if not tags:
-                        continue
-                    contact_id_to_tags.setdefault(cid, set()).update(tags)
+                if tables.get("wb_tags", True):
+                    for cid, v in _fetch_rows(conn, "wb_tags", "tags_parsed"):
+                        tags: Set[str] = set()
+                        for item in _as_list(v):
+                            if isinstance(item, dict):
+                                tag = (
+                                    item.get("name")
+                                    or item.get("tag_name")
+                                    or item.get("title")
+                                    or item.get("label")
+                                    or ""
+                                )
+                                tag = str(tag).strip()
+                                if tag:
+                                    tags.add(tag)
+                            else:
+                                s = str(item).strip()
+                                if s:
+                                    tags.add(s)
+                        if not tags:
+                            continue
+                        contact_id_to_tags.setdefault(cid, set()).update(tags)
             except Exception:
                 pass
 
             # Fallback: if parsed tables are empty, try wb_contacts (best-effort)
             if not phone_to_contact_ids or not email_to_contact_ids:
                 try:
+                    if tables.get("wb_contacts", False) is False:
+                        raise RuntimeError("wb_contacts not present")
                     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                         cur.execute("SELECT * FROM wb_contacts")
                         rows = cur.fetchall()
@@ -213,4 +251,8 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
         contact_id_to_tags,
         phone_rows_loaded=phone_rows_loaded,
         email_rows_loaded=email_rows_loaded,
+        connected=connected,
+        source="supabase",
+        error=err,
+        tables=tables,
     )
