@@ -12,6 +12,12 @@ D:/OrionAPI/.venv/Scripts/python.exe -m streamlit run .\streamlit_import_mapper.
 
 Preferred (Streamlit hosting): set `DATABASE_URL` in Streamlit Secrets.
 
+Example `secrets.toml` (local) or Streamlit Cloud Secrets:
+
+```toml
+DATABASE_URL = "postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+```
+
 Local dev: set `DATABASE_URL` in `D:\OrionAPI\.env`.
 
 The app uses these Supabase tables:

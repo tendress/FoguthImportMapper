@@ -29,12 +29,32 @@ def _load_env() -> None:
 def _get_database_url() -> str:
     # Streamlit Cloud best practice: use st.secrets
     try:
-        secret_val = st.secrets.get("DATABASE_URL")  # type: ignore[attr-defined]
+        secrets = st.secrets  # type: ignore[attr-defined]
     except Exception:
-        secret_val = None
-    if secret_val:
-        return str(secret_val).strip()
-    return os.getenv("DATABASE_URL", "").strip()
+        secrets = {}
+
+    # Common Streamlit secrets patterns
+    candidates = [
+        secrets.get("DATABASE_URL"),
+        secrets.get("database_url"),
+        (secrets.get("supabase") or {}).get("DATABASE_URL") if isinstance(secrets.get("supabase"), dict) else None,
+        (secrets.get("supabase") or {}).get("database_url") if isinstance(secrets.get("supabase"), dict) else None,
+        (secrets.get("connections") or {}).get("postgresql", {}).get("url")
+        if isinstance(secrets.get("connections"), dict)
+        else None,
+    ]
+
+    for v in candidates:
+        if v:
+            return str(v).strip()
+
+    # Environment variable fallbacks
+    for k in ("DATABASE_URL", "database_url", "SUPABASE_DATABASE_URL"):
+        v = os.getenv(k, "")
+        if v.strip():
+            return v.strip()
+
+    return ""
 
 
 @st.cache_data(ttl=600)
@@ -85,7 +105,10 @@ def main() -> None:
             st.success("DATABASE_URL set")
         else:
             st.error("DATABASE_URL missing")
-            st.caption("Set it in Streamlit secrets or as an environment variable.")
+            st.caption(
+                "Set DATABASE_URL in Streamlit Secrets (or secrets.toml) or as an environment variable. "
+                "Example: postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+            )
 
     uploaded = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
     if not uploaded:
