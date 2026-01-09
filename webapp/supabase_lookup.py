@@ -176,6 +176,8 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
                         rows = cur.fetchall()
                     for r in rows:
                         cid_val = r.get("contact_id") or r.get("id") or r.get("rowid")
+                        if cid_val is None:
+                            continue
                         try:
                             cid = int(cid_val)
                         except Exception:

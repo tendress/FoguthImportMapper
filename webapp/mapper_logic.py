@@ -158,8 +158,7 @@ def compute_wb_matches(
     row_contacts: Dict[int, str] = {}
     row_tags: Dict[int, str] = {}
 
-    for idx, row in mapped.iterrows():
-        row_idx = int(idx)
+    for row_idx, (_, row) in enumerate(mapped.iterrows()):
         contact_ids: Set[int] = set()
 
         norm_phone = _normalize_phone_value(row.get("phone", ""))

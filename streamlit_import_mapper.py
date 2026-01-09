@@ -18,6 +18,7 @@ from webapp.mapper_logic import (
     simple_validate,
 )
 from webapp.supabase_lookup import load_wealthbox_lookups
+from webapp.sqlite_lookup import load_wealthbox_lookups_from_sqlite
 
 
 def _load_env() -> None:
@@ -55,6 +56,14 @@ def _get_database_url() -> str:
             return v.strip()
 
     return ""
+
+
+def _get_sqlite_db_path() -> str:
+    # Mirror import_mapper.py: FOGUTH_DATA_ROOT or script directory
+    script_dir = Path(__file__).resolve().parent
+    data_root = Path(os.environ.get("FOGUTH_DATA_ROOT", str(script_dir)))
+    db_path = (data_root / "FoguthForge.db").resolve()
+    return str(db_path)
 
 
 @st.cache_data(ttl=600)
@@ -101,13 +110,19 @@ def main() -> None:
     with st.sidebar:
         st.header("Connection")
         db_url = _get_database_url()
+        sqlite_path = _get_sqlite_db_path()
+        sqlite_exists = Path(sqlite_path).exists()
+
         if db_url:
-            st.success("DATABASE_URL set")
+            st.success("DATABASE_URL set (Postgres)")
+        elif sqlite_exists:
+            st.success("Using local FoguthForge.db (SQLite)")
+            st.caption(f"Detected: {sqlite_path}")
         else:
             st.error("DATABASE_URL missing")
             st.caption(
                 "Set DATABASE_URL in Streamlit Secrets (or secrets.toml) or as an environment variable. "
-                "Example: postgresql://USER:PASSWORD@HOST:5432/DBNAME"
+                "For local mode, place FoguthForge.db under FOGUTH_DATA_ROOT (or next to this script)."
             )
 
     uploaded = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
@@ -143,7 +158,11 @@ def main() -> None:
 
     mapped = apply_mapping(df, mapping)
 
-    wb = _cached_wb(db_url) if db_url else None
+    if db_url:
+        wb = _cached_wb(db_url)
+    else:
+        sqlite_path = _get_sqlite_db_path()
+        wb = load_wealthbox_lookups_from_sqlite(sqlite_path) if Path(sqlite_path).exists() else None
     if wb is None:
         match_rows, row_contacts, row_tags = set(), {}, {}
     else:
