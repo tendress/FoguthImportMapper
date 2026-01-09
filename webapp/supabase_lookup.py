@@ -117,9 +117,9 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
         )
 
     try:
-        conn = psycopg2.connect(database_url)
-    except Exception:
-        err = "Failed to connect to Postgres (check DATABASE_URL, SSL, network, and password)."
+        conn = psycopg2.connect(database_url, connect_timeout=10)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
         return WealthboxLookups(
             phone_to_contact_ids,
             email_to_contact_ids,
@@ -138,9 +138,12 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
             try:
                 with conn.cursor() as cur:
                     for t in ("wb_phone_numbers", "wb_emails", "wb_tags", "wb_contacts"):
-                        cur.execute("SELECT to_regclass(%s)", (f"public.{t}",))
+                        cur.execute(
+                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = %s)",
+                            (t,),
+                        )
                         row = cur.fetchone()
-                        tables[t] = bool(row and row[0] is not None)
+                        tables[t] = bool(row and bool(row[0]))
             except Exception:
                 # If we can't check, don't fail the load.
                 tables = {}
