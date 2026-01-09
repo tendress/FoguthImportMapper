@@ -2,105 +2,142 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Set, Tuple
+from difflib import get_close_matches
+from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
 import pandas as pd
 
 
-# Keep this list stable: it drives the Streamlit mapping UI.
+# Mirror import_mapper.py
 TARGET_COLUMNS: list[str] = [
-    "First Name",
-    "Last Name",
-    "Company",
-    "Email",
-    "Email 2",
-    "Phone",
-    "Phone 2",
-    "Address 1",
-    "Address 2",
-    "City",
-    "State",
-    "Zip",
+    "first_name",
+    "last_name",
+    "phone",
+    "email",
+    "address",
+    "city",
+    "state",
+    "zip",
+    "notes",
+    "household_name",
+    "household_role",
 ]
 
-
-_EMAIL_RE = re.compile(r"\s+")
-_NON_DIGIT_RE = re.compile(r"\D+")
+EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 
 
-def _norm_key(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
-
-
-def _norm_email(v: object) -> str:
+def _normalize_phone_value(v: Any) -> str:
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return ""
-    s = str(v).strip().lower()
-    s = _EMAIL_RE.sub("", s)
-    return s
+    try:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            v = str(int(round(float(v))))
+        s = str(v)
+        if "e" in s.lower():
+            try:
+                s = str(int(round(float(s))))
+            except Exception:
+                pass
+        digits = re.sub(r"[^\d]", "", s)
+        if len(digits) >= 11 and digits.startswith("1"):
+            digits = digits[1:]
+        return digits
+    except Exception:
+        return ""
 
 
-def _norm_phone(v: object) -> str:
+def _safe_lower_strip(v: Any) -> str:
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return ""
-    s = str(v)
-    digits = _NON_DIGIT_RE.sub("", s)
-    if len(digits) > 10:
-        # Common cases include +1 prefix; keep last 10 digits.
-        digits = digits[-10:]
-    return digits
+    return str(v).strip().lower()
 
 
-def auto_suggest(source_cols: Sequence[str]) -> Dict[str, str]:
-    """Best-effort suggestions from uploaded columns to TARGET_COLUMNS."""
+def best_match(name: str, candidates: list[str]) -> Optional[str]:
+    if not candidates:
+        return None
+    lower_map = {str(c).lower(): str(c) for c in candidates}
+    if name.lower() in lower_map:
+        return lower_map[name.lower()]
+    matches = get_close_matches(name, candidates, n=1, cutoff=0.6)
+    return matches[0] if matches else None
 
-    src_by_key: Dict[str, str] = {}
-    for c in source_cols:
-        src_by_key[_norm_key(str(c))] = str(c)
 
-    synonyms: Dict[str, Tuple[str, ...]] = {
-        "First Name": ("firstname", "first", "givenname", "fname"),
-        "Last Name": ("lastname", "last", "surname", "lname"),
-        "Company": ("company", "organization", "business", "employer"),
-        "Email": ("email", "emailaddress", "email1", "e-mail"),
-        "Email 2": ("email2", "emailaddress2", "alternateemail", "secondaryemail"),
-        "Phone": ("phone", "phonenumber", "phone1", "mobile", "cell"),
-        "Phone 2": ("phone2", "phonenumber2", "alternatephone", "secondaryphone"),
-        "Address 1": ("address1", "street", "streetaddress", "street1", "addr1"),
-        "Address 2": ("address2", "street2", "suite", "unit", "addr2"),
-        "City": ("city", "town"),
-        "State": ("state", "province", "region"),
-        "Zip": ("zip", "zipcode", "postal", "postalcode"),
-    }
-
-    out: Dict[str, str] = {}
-    for target, keys in synonyms.items():
-        for k in keys:
-            match = src_by_key.get(_norm_key(k))
-            if match:
-                out[target] = match
-                break
-
-    # If there are exact name matches, prefer them.
-    for target in TARGET_COLUMNS:
-        key = _norm_key(target)
-        if key in src_by_key:
-            out[target] = src_by_key[key]
-
-    return out
+def auto_suggest(source_cols: list[str]) -> Dict[str, str]:
+    suggestions: Dict[str, str] = {}
+    for t in TARGET_COLUMNS:
+        found = best_match(t, source_cols)
+        if found:
+            suggestions[t] = found
+    return suggestions
 
 
 def apply_mapping(df: pd.DataFrame, mapping: Mapping[str, Optional[str]]) -> pd.DataFrame:
-    """Return a DataFrame with TARGET_COLUMNS populated from source df."""
+    """Apply column mapping with the same semantics as import_mapper.py.
 
-    out = pd.DataFrame(index=df.index)
-    for target in TARGET_COLUMNS:
-        src = mapping.get(target)
-        if src and src in df.columns:
-            out[target] = df[src]
-        else:
-            out[target] = pd.NA
-    return out
+    - Renames mapped source columns to the TARGET_COLUMNS names
+    - Ensures all TARGET_COLUMNS exist
+    - Builds household_name and attendee/guest household pairing (if a Type column exists)
+    - Adds _orig_index column preserving original row index
+    """
+
+    rename: Dict[str, str] = {}
+    for target, src in mapping.items():
+        if src and src != "(none)" and src in df.columns:
+            rename[str(src)] = str(target)
+
+    mapped = df.rename(columns=rename).copy()
+    for col in TARGET_COLUMNS:
+        if col not in mapped.columns:
+            mapped[col] = pd.NA
+
+    if "last_name" in mapped.columns and "first_name" in mapped.columns:
+        last = mapped["last_name"].fillna("").astype(str).str.strip()
+        first = mapped["first_name"].fillna("").astype(str).str.strip()
+        combined = last.where(last != "", "") + (", " + first).where(first != "", "")
+        mapped["household_name"] = combined.str.strip().replace("", pd.NA)
+
+    type_col = next((c for c in mapped.columns if str(c).lower() == "type"), None)
+    if (
+        type_col
+        and "last_name" in mapped.columns
+        and "first_name" in mapped.columns
+        and "household_role" in mapped.columns
+    ):
+        last_attendee_idx: Optional[int] = None
+        last_attendee_first = ""
+        last_attendee_last = ""
+        for i in mapped.index:
+            raw_type = mapped.at[i, type_col]
+            tval = str(raw_type).strip().lower() if raw_type is not None else ""
+            cur_last = str(mapped.at[i, "last_name"]).strip() if pd.notna(mapped.at[i, "last_name"]) else ""
+            cur_first = str(mapped.at[i, "first_name"]).strip() if pd.notna(mapped.at[i, "first_name"]) else ""
+
+            if tval == "attendee":
+                last_attendee_idx = int(i)
+                last_attendee_first = cur_first
+                last_attendee_last = cur_last
+                mapped.at[i, "household_role"] = "1"
+            elif tval == "guest":
+                if (
+                    last_attendee_idx is not None
+                    and last_attendee_last
+                    and cur_last
+                    and cur_last.lower() == last_attendee_last.lower()
+                ):
+                    common_last = last_attendee_last or cur_last
+                    name_str = f"{common_last}, {cur_first} and {last_attendee_first}"
+                    name_str = re.sub(r"\s+,\s+", ", ", name_str)
+                    name_str = re.sub(r"\s+and\s+", " and ", name_str)
+                    mapped.at[i, "household_name"] = name_str
+                    mapped.at[last_attendee_idx, "household_name"] = name_str
+                    mapped.at[last_attendee_idx, "household_role"] = "1"
+                    mapped.at[i, "household_role"] = "4"
+                    for addr_col in ("address", "city", "state", "zip"):
+                        if addr_col in mapped.columns:
+                            mapped.at[i, addr_col] = mapped.at[last_attendee_idx, addr_col]
+
+    mapped = mapped.reset_index(drop=False).rename(columns={"index": "_orig_index"})
+    return mapped
 
 
 @dataclass(frozen=True)
@@ -108,106 +145,76 @@ class WealthboxLookups:
     phone_to_contact_ids: Mapping[str, Set[int]]
     email_to_contact_ids: Mapping[str, Set[int]]
     contact_id_to_tags: Mapping[int, Set[str]]
-
-
-def _iter_values(row: pd.Series, cols: Iterable[str]) -> Iterable[object]:
-    for c in cols:
-        if c in row.index:
-            yield row[c]
+    phone_rows_loaded: int = 0
+    email_rows_loaded: int = 0
 
 
 def compute_wb_matches(
     mapped: pd.DataFrame, wb: WealthboxLookups
 ) -> Tuple[Set[int], Dict[int, str], Dict[int, str]]:
-    """Match rows to Wealthbox contacts by email/phone.
-
-    Returns:
-      match_rows: set of row indexes that match at least one contact
-      row_contacts: row index -> comma-separated contact id(s)
-      row_tags: row index -> comma-separated tag(s) for the matched contact(s)
-    """
-
-    email_cols = [c for c in mapped.columns if "email" in c.lower()]
-    phone_cols = [c for c in mapped.columns if "phone" in c.lower()]
+    """Match rows to Wealthbox contacts by phone/email like import_mapper.py."""
 
     match_rows: Set[int] = set()
     row_contacts: Dict[int, str] = {}
     row_tags: Dict[int, str] = {}
 
-    for row_pos in range(int(len(mapped))):
-        row = mapped.iloc[row_pos]
+    for idx, row in mapped.iterrows():
+        row_idx = int(idx)
         contact_ids: Set[int] = set()
 
-        for v in _iter_values(row, email_cols):
-            e = _norm_email(v)
-            if not e:
-                continue
-            contact_ids |= wb.email_to_contact_ids.get(e, set())
+        norm_phone = _normalize_phone_value(row.get("phone", ""))
+        if norm_phone and len(norm_phone) >= 7:
+            contact_ids |= wb.phone_to_contact_ids.get(norm_phone, set())
 
-        for v in _iter_values(row, phone_cols):
-            p = _norm_phone(v)
-            if not p:
-                continue
-            contact_ids |= wb.phone_to_contact_ids.get(p, set())
+        norm_email = _safe_lower_strip(row.get("email", ""))
+        if norm_email and "@" in norm_email:
+            contact_ids |= wb.email_to_contact_ids.get(norm_email, set())
 
         if not contact_ids:
             continue
 
-        match_rows.add(row_pos)
-        row_contacts[row_pos] = ",".join(str(i) for i in sorted(contact_ids))
+        match_rows.add(row_idx)
+        row_contacts[row_idx] = ",".join(str(i) for i in sorted(contact_ids))
 
         tags: Set[str] = set()
         for cid in contact_ids:
             tags |= wb.contact_id_to_tags.get(int(cid), set())
-        row_tags[row_pos] = ",".join(sorted(tags))
+        row_tags[row_idx] = ",".join(sorted(tags))
 
     return match_rows, row_contacts, row_tags
 
 
 def simple_validate(mapped: pd.DataFrame):
-    """Lightweight health checks for the mapped output."""
-
-    def _count_blank(col: str) -> int:
-        if col not in mapped.columns:
-            return int(len(mapped))
-        s = mapped[col]
-        # Treat NA, empty string and whitespace-only as blank.
-        return int((s.isna() | (s.astype(str).str.strip() == "")).sum())
-
-    total = int(len(mapped))
-    missing_first = _count_blank("First Name")
-    missing_last = _count_blank("Last Name")
-
-    email_cols = [c for c in mapped.columns if "email" in c.lower()]
-    phone_cols = [c for c in mapped.columns if "phone" in c.lower()]
-
-    any_email = pd.Series(False, index=mapped.index)
-    for c in email_cols:
-        any_email |= (~mapped[c].isna()) & (mapped[c].astype(str).str.strip() != "")
-
-    any_phone = pd.Series(False, index=mapped.index)
-    for c in phone_cols:
-        any_phone |= (~mapped[c].isna()) & (mapped[c].astype(str).str.strip() != "")
-
-    missing_both = int((~any_email & ~any_phone).sum())
-
-    return [
-        ("rows", total),
-        ("missing_first_name", missing_first),
-        ("missing_last_name", missing_last),
-        ("missing_email_and_phone", missing_both),
-    ]
+    checks = []
+    for c in TARGET_COLUMNS:
+        if c in mapped.columns:
+            checks.append((f"Missing in {c}", int(mapped[c].isna().sum())))
+        else:
+            checks.append((f"Missing column {c}", "Not mapped"))
+    if "email" in mapped.columns:
+        n_bad = (~mapped["email"].dropna().astype(str).str.match(EMAIL_RE)).sum()
+        checks.append(("Invalid email count", int(n_bad)))
+    if "phone" in mapped.columns:
+        digits_only = mapped["phone"].fillna("").astype(str).str.replace(r"\D", "", regex=True)
+        too_short = (digits_only.str.len() < 7) & (digits_only.str.len() > 0)
+        checks.append(("Phone values with <7 digits", int(too_short.sum())))
+    return checks
 
 
 def export_csv_bytes(mapped: pd.DataFrame) -> bytes:
-    export_df = mapped.copy()
-    drop_cols = [c for c in export_df.columns if str(c).startswith("wb_")]
-    if drop_cols:
-        export_df = export_df.drop(columns=drop_cols, errors="ignore")
+    df = mapped.copy()
+    if "_orig_index" in df.columns:
+        df = df.drop(columns=["_orig_index"], errors="ignore")
+    if "wb_tags" in df.columns:
+        df = df.drop(columns=["wb_tags"], errors="ignore")
 
-    # Keep stable column order.
-    cols = [c for c in TARGET_COLUMNS if c in export_df.columns]
-    other = [c for c in export_df.columns if c not in cols]
-    export_df = export_df[cols + other]
-
-    return export_df.to_csv(index=False).encode("utf-8")
+    # Export only target columns, in order.
+    for c in TARGET_COLUMNS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    final = df[TARGET_COLUMNS]
+    if "zip" in final.columns:
+        final["zip"] = final["zip"].apply(
+            lambda x: str(x)[:-2] if str(x).endswith(".0") else str(x) if pd.notna(x) else x
+        )
+    return final.to_csv(index=False).encode("utf-8")

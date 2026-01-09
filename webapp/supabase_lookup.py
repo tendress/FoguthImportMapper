@@ -1,27 +1,28 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+import re
+from typing import Dict, List, Set, Tuple
 
+import pandas as pd
 import psycopg2
 import psycopg2.extras
 
 from .mapper_logic import WealthboxLookups
 
 
-def _as_str_list(v: object) -> List[str]:
+def _as_list(v: object) -> List[object]:
     if v is None:
         return []
 
     if isinstance(v, (list, tuple)):
-        return [str(x) for x in v if x is not None and str(x).strip() != ""]
+        return [x for x in v if x is not None]
 
     if isinstance(v, dict):
         # Some JSON blobs might be {"values": [...]} etc.
-        flat: List[str] = []
+        flat: List[object] = []
         for item in v.values():
-            flat.extend(_as_str_list(item))
+            flat.extend(_as_list(item))
         return flat
 
     if isinstance(v, str):
@@ -31,23 +32,38 @@ def _as_str_list(v: object) -> List[str]:
         # JSON array/object stored as text
         if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
             try:
-                return _as_str_list(json.loads(s))
+                return _as_list(json.loads(s))
             except Exception:
                 return [s]
         return [s]
 
-    return [str(v)]
+    return [v]
 
 
-def _norm_email(e: str) -> str:
-    return (e or "").strip().lower()
+def _safe_lower_strip(v: object) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return str(v).strip().lower()
 
 
-def _norm_phone(p: str) -> str:
-    digits = "".join(ch for ch in (p or "") if ch.isdigit())
-    if len(digits) > 10:
-        digits = digits[-10:]
-    return digits
+def _normalize_phone_value(v: object) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    try:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            v = str(int(round(float(v))))
+        s = str(v)
+        if "e" in s.lower():
+            try:
+                s = str(int(round(float(s))))
+            except Exception:
+                pass
+        digits = re.sub(r"[^\d]", "", s)
+        if len(digits) >= 11 and digits.startswith("1"):
+            digits = digits[1:]
+        return digits
+    except Exception:
+        return ""
 
 
 def _fetch_rows(
@@ -83,6 +99,8 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
     phone_to_contact_ids: Dict[str, Set[int]] = {}
     email_to_contact_ids: Dict[str, Set[int]] = {}
     contact_id_to_tags: Dict[int, Set[str]] = {}
+    phone_rows_loaded = 0
+    email_rows_loaded = 0
 
     if not (database_url or "").strip():
         return WealthboxLookups(phone_to_contact_ids, email_to_contact_ids, contact_id_to_tags)
@@ -96,35 +114,90 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
         with conn:
             # Phones
             try:
-                for cid, v in _fetch_rows(conn, "wb_phone_numbers", "phone_numbers_parsed"):
-                    for raw in _as_str_list(v):
-                        p = _norm_phone(raw)
-                        if not p:
-                            continue
-                        phone_to_contact_ids.setdefault(p, set()).add(cid)
+                rows = _fetch_rows(conn, "wb_phone_numbers", "phone_numbers_parsed")
+                phone_rows_loaded = len(rows)
+                for cid, v in rows:
+                    for item in _as_list(v):
+                        if isinstance(item, dict) and "address" in item:
+                            digits = _normalize_phone_value(item.get("address"))
+                        else:
+                            digits = _normalize_phone_value(item)
+                        if digits:
+                            phone_to_contact_ids.setdefault(digits, set()).add(cid)
             except Exception:
                 pass
 
             # Emails
             try:
-                for cid, v in _fetch_rows(conn, "wb_emails", "email_addresses_parsed"):
-                    for raw in _as_str_list(v):
-                        e = _norm_email(raw)
-                        if not e:
-                            continue
-                        email_to_contact_ids.setdefault(e, set()).add(cid)
+                rows = _fetch_rows(conn, "wb_emails", "email_addresses_parsed")
+                email_rows_loaded = len(rows)
+                for cid, v in rows:
+                    for item in _as_list(v):
+                        if isinstance(item, dict) and "address" in item:
+                            em = _safe_lower_strip(item.get("address"))
+                        else:
+                            em = _safe_lower_strip(item)
+                        if em:
+                            email_to_contact_ids.setdefault(em, set()).add(cid)
             except Exception:
                 pass
 
             # Tags
             try:
                 for cid, v in _fetch_rows(conn, "wb_tags", "tags_parsed"):
-                    tags = {t.strip() for t in _as_str_list(v) if str(t).strip()}
+                    tags: Set[str] = set()
+                    for item in _as_list(v):
+                        if isinstance(item, dict):
+                            tag = (
+                                item.get("name")
+                                or item.get("tag_name")
+                                or item.get("title")
+                                or item.get("label")
+                                or ""
+                            )
+                            tag = str(tag).strip()
+                            if tag:
+                                tags.add(tag)
+                        else:
+                            s = str(item).strip()
+                            if s:
+                                tags.add(s)
                     if not tags:
                         continue
                     contact_id_to_tags.setdefault(cid, set()).update(tags)
             except Exception:
                 pass
+
+            # Fallback: if parsed tables are empty, try wb_contacts (best-effort)
+            if not phone_to_contact_ids or not email_to_contact_ids:
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        cur.execute("SELECT * FROM wb_contacts")
+                        rows = cur.fetchall()
+                    for r in rows:
+                        cid_val = r.get("contact_id") or r.get("id") or r.get("rowid")
+                        try:
+                            cid = int(cid_val)
+                        except Exception:
+                            continue
+                        for k, v in r.items():
+                            lk = str(k).lower()
+                            if "phone" in lk and v is not None:
+                                for item in _as_list(v):
+                                    digits = _normalize_phone_value(
+                                        item.get("address") if isinstance(item, dict) else item
+                                    )
+                                    if digits:
+                                        phone_to_contact_ids.setdefault(digits, set()).add(cid)
+                            if "email" in lk and v is not None:
+                                for item in _as_list(v):
+                                    em = _safe_lower_strip(
+                                        item.get("address") if isinstance(item, dict) else item
+                                    )
+                                    if em:
+                                        email_to_contact_ids.setdefault(em, set()).add(cid)
+                except Exception:
+                    pass
 
     finally:
         try:
@@ -132,4 +205,10 @@ def load_wealthbox_lookups(database_url: str) -> WealthboxLookups:
         except Exception:
             pass
 
-    return WealthboxLookups(phone_to_contact_ids, email_to_contact_ids, contact_id_to_tags)
+    return WealthboxLookups(
+        phone_to_contact_ids,
+        email_to_contact_ids,
+        contact_id_to_tags,
+        phone_rows_loaded=phone_rows_loaded,
+        email_rows_loaded=email_rows_loaded,
+    )

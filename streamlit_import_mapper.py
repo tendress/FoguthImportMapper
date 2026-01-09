@@ -114,7 +114,7 @@ def main() -> None:
     if not uploaded:
         st.stop()
 
-    df = _read_upload_to_df(uploaded).fillna(pd.NA).reset_index(drop=True)
+    df = _read_upload_to_df(uploaded).fillna(pd.NA)
     st.caption(f"Loaded {len(df):,} rows × {len(df.columns):,} columns")
 
     source_cols = list(df.columns.astype(str))
@@ -137,36 +137,43 @@ def main() -> None:
             )
             mapping[target] = None if choice == "(none)" else str(choice)
 
-    if not st.button("Preview"):
+    apply_clicked = st.button("Apply Mapping")
+    if not apply_clicked:
         st.stop()
 
     mapped = apply_mapping(df, mapping)
 
-    if not db_url:
-        st.error("Cannot run Wealthbox matching without DATABASE_URL")
-        st.stop()
-
-    wb = _cached_wb(db_url)
-    match_rows, row_contacts, row_tags = compute_wb_matches(mapped, wb)
+    wb = _cached_wb(db_url) if db_url else None
+    if wb is None:
+        match_rows, row_contacts, row_tags = set(), {}, {}
+    else:
+        match_rows, row_contacts, row_tags = compute_wb_matches(mapped, wb)
 
     mapped = mapped.copy()
     mapped["wb_tags"] = ""
     for ridx, tags in row_tags.items():
-        mapped.at[ridx, "wb_tags"] = tags
+        mapped.at[int(ridx), "wb_tags"] = tags
 
     st.subheader("Summary")
     st.write({"matched_rows": len(match_rows), "total_rows": int(len(mapped))})
 
     checks = simple_validate(mapped)
+    if wb is not None:
+        checks.append(("WB phone rows loaded", getattr(wb, "phone_rows_loaded", 0)))
+        checks.append(("WB email rows loaded", getattr(wb, "email_rows_loaded", 0)))
     st.subheader("Checks")
     st.table(pd.DataFrame(checks, columns=["check", "value"]))
 
     st.subheader("Preview")
+    highlight = st.checkbox("Highlight Wealthbox matches", value=True)
     display_cols = TARGET_COLUMNS + ["wb_tags"]
-    preview = mapped[display_cols].head(200).copy()
+    preview = mapped[display_cols].copy()
     for c in preview.columns:
         preview[c] = preview[c].apply(_fmt_cell)
-    st.dataframe(preview.style.apply(_style_matches(match_rows), axis=1), width="stretch")
+    if highlight and match_rows:
+        st.dataframe(preview.style.apply(_style_matches(match_rows), axis=1), width="stretch")
+    else:
+        st.dataframe(preview, width="stretch")
 
     st.subheader("Export")
     out_bytes = export_csv_bytes(mapped)
