@@ -91,7 +91,7 @@ def main() -> None:
     if not uploaded:
         st.stop()
 
-    df = _read_upload_to_df(uploaded).fillna(pd.NA)
+    df = _read_upload_to_df(uploaded).fillna(pd.NA).reset_index(drop=True)
     st.caption(f"Loaded {len(df):,} rows × {len(df.columns):,} columns")
 
     source_cols = list(df.columns.astype(str))

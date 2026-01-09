@@ -134,7 +134,8 @@ def compute_wb_matches(
     row_contacts: Dict[int, str] = {}
     row_tags: Dict[int, str] = {}
 
-    for idx, row in mapped.iterrows():
+    for row_pos in range(int(len(mapped))):
+        row = mapped.iloc[row_pos]
         contact_ids: Set[int] = set()
 
         for v in _iter_values(row, email_cols):
@@ -152,13 +153,13 @@ def compute_wb_matches(
         if not contact_ids:
             continue
 
-        match_rows.add(int(idx))
-        row_contacts[int(idx)] = ",".join(str(i) for i in sorted(contact_ids))
+        match_rows.add(row_pos)
+        row_contacts[row_pos] = ",".join(str(i) for i in sorted(contact_ids))
 
         tags: Set[str] = set()
         for cid in contact_ids:
             tags |= wb.contact_id_to_tags.get(int(cid), set())
-        row_tags[int(idx)] = ",".join(sorted(tags))
+        row_tags[row_pos] = ",".join(sorted(tags))
 
     return match_rows, row_contacts, row_tags
 
