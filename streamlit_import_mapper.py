@@ -190,7 +190,11 @@ def main() -> None:
         checks.append(("WB unique phones", len(getattr(wb, "phone_to_contact_ids", {}) or {})))
         checks.append(("WB unique emails", len(getattr(wb, "email_to_contact_ids", {}) or {})))
     st.subheader("Checks")
-    st.table(pd.DataFrame(checks, columns=["check", "value"]))
+    checks_df = pd.DataFrame(checks, columns=["check", "value"]).copy()
+    # Streamlit Cloud (pyarrow) can choke on mixed-type columns; keep this display-only.
+    checks_df["check"] = checks_df["check"].astype(str)
+    checks_df["value"] = checks_df["value"].astype(str)
+    st.table(checks_df)
 
     st.subheader("Preview")
     highlight = st.checkbox("Highlight Wealthbox matches", value=True)

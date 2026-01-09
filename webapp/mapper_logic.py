@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from difflib import get_close_matches
 from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
@@ -140,17 +139,29 @@ def apply_mapping(df: pd.DataFrame, mapping: Mapping[str, Optional[str]]) -> pd.
     return mapped
 
 
-@dataclass(frozen=True)
 class WealthboxLookups:
-    phone_to_contact_ids: Mapping[str, Set[int]]
-    email_to_contact_ids: Mapping[str, Set[int]]
-    contact_id_to_tags: Mapping[int, Set[str]]
-    phone_rows_loaded: int = 0
-    email_rows_loaded: int = 0
-    connected: bool = False
-    source: str = ""
-    error: str | None = None
-    tables: Mapping[str, bool] | None = None
+    def __init__(
+        self,
+        phone_to_contact_ids: Mapping[str, Set[int]],
+        email_to_contact_ids: Mapping[str, Set[int]],
+        contact_id_to_tags: Mapping[int, Set[str]],
+        *,
+        phone_rows_loaded: int = 0,
+        email_rows_loaded: int = 0,
+        connected: bool = False,
+        source: str = "",
+        error: Optional[str] = None,
+        tables: Optional[Mapping[str, bool]] = None,
+    ) -> None:
+        self.phone_to_contact_ids = phone_to_contact_ids
+        self.email_to_contact_ids = email_to_contact_ids
+        self.contact_id_to_tags = contact_id_to_tags
+        self.phone_rows_loaded = int(phone_rows_loaded)
+        self.email_rows_loaded = int(email_rows_loaded)
+        self.connected = bool(connected)
+        self.source = str(source)
+        self.error = error
+        self.tables = tables
 
 
 def compute_wb_matches(
@@ -215,9 +226,9 @@ def export_csv_bytes(mapped: pd.DataFrame) -> bytes:
     for c in TARGET_COLUMNS:
         if c not in df.columns:
             df[c] = pd.NA
-    final = df[TARGET_COLUMNS]
+    final = df[TARGET_COLUMNS].copy()
     if "zip" in final.columns:
-        final["zip"] = final["zip"].apply(
+        final.loc[:, "zip"] = final["zip"].apply(
             lambda x: str(x)[:-2] if str(x).endswith(".0") else str(x) if pd.notna(x) else x
         )
     return final.to_csv(index=False).encode("utf-8")
